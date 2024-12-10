@@ -1,5 +1,5 @@
 # SSL issue
-
+import json
 import os
 import requests
 from huggingface_hub import configure_http_backend
@@ -15,7 +15,7 @@ os.environ["CURL_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
-import os
+
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Subset, Dataset
-
+from torchvision.datasets import ImageFolder
 
 class Net(nn.Module):
     def __init__(self, num_classes=9):
@@ -47,33 +47,14 @@ class Net(nn.Module):
         x = self.fc3(x)
         return x
 
-
-class RemappedDataset(Dataset):
-    def __init__(self, original_dataset, omit_class):
-        self.data = []
-        self.targets = []
-
-        for img, label in original_dataset:
-            if label != omit_class:
-                # Remap labels to ensure continuous indexing
-                new_label = label if label < omit_class else label - 1
-                self.data.append(img)
-                self.targets.append(new_label)
-
-        self.data = torch.stack(self.data)
-        self.targets = torch.tensor(self.targets)
-
-    def __getitem__(self, index):
-        return self.data[index], self.targets[index]
-
-    def __len__(self):
-        return len(self.targets)
-
-
-def train_model(train_loader, val_loader, num_classes, epochs=10, learning_rate=0.001):
+def train_model(train_loader, val_loader, num_classes, model_name='default', epochs=10, learning_rate=0.001):
     """
-    Train model and track performance
+    Train model and track performance with results saving
     """
+    # Create results directory if it doesn't exist
+    results_dir = './model_results'
+    os.makedirs(results_dir, exist_ok=True)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Initialize model, loss, and optimizer
@@ -163,36 +144,48 @@ def train_model(train_loader, val_loader, num_classes, epochs=10, learning_rate=
     plt.subplot(2, 2, 1)
     plt.plot(train_losses, label='Train Loss')
     plt.plot(val_losses, label='Val Loss')
-    plt.title('Loss over Epochs')
+    plt.title(f'{model_name} - Loss over Epochs')
     plt.legend()
 
     # Accuracy plot
     plt.subplot(2, 2, 2)
     plt.plot(train_accuracies, label='Train Accuracy')
     plt.plot(val_accuracies, label='Val Accuracy')
-    plt.title('Accuracy over Epochs')
+    plt.title(f'{model_name} - Accuracy over Epochs')
     plt.legend()
 
     # Per-class accuracy plot
     plt.subplot(2, 2, 3)
     plt.bar(range(num_classes), class_accuracies)
-    plt.title('Per-Class Validation Accuracy')
+    plt.title(f'{model_name} - Per-Class Validation Accuracy')
     plt.xlabel('Remapped Class Index')
     plt.ylabel('Accuracy (%)')
     plt.xticks(range(num_classes), range(num_classes))
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(os.path.join(results_dir, f'{model_name}_performance.png'))
+    plt.close()
 
-    return {
-        'model': net,
+    # Save results to JSON
+    results = {
+        'model_name': model_name,
         'train_losses': train_losses,
         'val_losses': val_losses,
         'train_accuracies': train_accuracies,
         'val_accuracies': val_accuracies,
-        'class_accuracies': class_accuracies
+        'class_accuracies': class_accuracies,
+        'final_train_accuracy': train_accuracies[-1],
+        'final_val_accuracy': val_accuracies[-1]
     }
 
+    # Save results to a JSON file
+    with open(os.path.join(results_dir, f'{model_name}_results.json'), 'w') as f:
+        json.dump(results, f)
+
+    # Save model
+    torch.save(net.state_dict(), os.path.join(results_dir, f'{model_name}_model.pth'))
+
+    return results
 
 def main():
     # Transformations
@@ -201,43 +194,45 @@ def main():
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
 
-    # Load full dataset
-    full_dataset = torchvision.datasets.CIFAR10(
-        root='/mnt/data/datasets',
-        # root='./data',
-        train=True, download=True,
-        transform=transform)
-
-    # Choose class to omit (e.g., 'cat' which is index 3)
-    omit_class = 3  # cat
-
-    # Create remapped dataset
-    remapped_dataset = RemappedDataset(full_dataset, omit_class)
-
-    # Split dataset
-    train_indices, val_indices = train_test_split(
-        list(range(len(remapped_dataset))),
-        test_size=0.2,
-        stratify=remapped_dataset.targets
-    )
-
-    train_dataset = Subset(remapped_dataset, train_indices)
-    val_dataset = Subset(remapped_dataset, val_indices)
+    # Load dataset from directories
+    root_dir = './prepared_data'
+    train_dataset = ImageFolder(root=os.path.join(root_dir, 'train'), transform=transform)
+    val_dataset = ImageFolder(root=os.path.join(root_dir, 'val'), transform=transform)
+    test_dataset = ImageFolder(root=os.path.join(root_dir, 'test'), transform=transform)
 
     # Create data loaders
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=2)
-
-    # Original classes (for reference)
-    original_classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
-
-    # Removed classes list (excluding the omitted class)
-    classes = [cls for i, cls in enumerate(original_classes) if i != omit_class]
-    print("Training on classes:", classes)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=2)
 
     # Train and evaluate
-    results = train_model(train_loader, val_loader, num_classes=len(classes))
+    classes = train_dataset.classes
+    print("Training on classes:", classes)
 
+    # Train multiple models with different hyperparameters
+    models_to_train = [
+        {'name': 'model_lr_0.001', 'learning_rate': 0.001},
+        {'name': 'model_lr_0.0001', 'learning_rate': 0.0001},
+        {'name': 'model_epochs_5', 'learning_rate': 0.001, 'epochs': 5},
+        {'name': 'model_epochs_15', 'learning_rate': 0.001, 'epochs': 15}
+    ]
+
+    all_results = {}
+    for model_config in models_to_train:
+        print(f"\nTraining {model_config['name']}:")
+        model_results = train_model(
+            train_loader,
+            val_loader,
+            num_classes=len(classes),
+            model_name=model_config['name'],
+            learning_rate=model_config.get('learning_rate', 0.001),
+            epochs=model_config.get('epochs', 10)
+        )
+        all_results[model_config['name']] = model_results
+
+    # Save comprehensive results
+    with open('./model_results/comprehensive_results.json', 'w') as f:
+        json.dump(all_results, f)
 
 if __name__ == '__main__':
     main()

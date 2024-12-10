@@ -16,7 +16,7 @@ os.environ["CURL_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
-# --
+# -- CIFA-10 Dataset Preparation
 
 import os
 import shutil
