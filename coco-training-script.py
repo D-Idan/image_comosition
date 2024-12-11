@@ -4,7 +4,7 @@ import os
 import requests
 from huggingface_hub import configure_http_backend
 
-from prepared_data_cifar import path_train_original, path_train_one_percent, path_train_double_one_percent, path_val
+from prepared_data_coco import path_train_original, path_train_one_percent, path_train_double_one_percent, path_val
 
 
 def backend_factory() -> requests.Session:
@@ -21,6 +21,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 import torch
 import torchvision
+import torchvision.models as models
 import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,24 +32,13 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Subset, Dataset
 from torchvision.datasets import ImageFolder
 
-class Net(nn.Module):
-    def __init__(self, num_classes=9):
-        super().__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, num_classes)
+def Net(num_classes=9):
+    # Load the ResNet-18 model pre-trained on ImageNet
+    model = models.resnet18(pretrained=True)
+    # Modify the final fully connected layer for 80 classes (COCO categories)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
 
-    def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
 
 def train_model(train_loader, val_loader, num_classes, model_name='default', epochs=2, learning_rate=0.001):
     """
@@ -184,10 +174,8 @@ def train_model(train_loader, val_loader, num_classes, model_name='default', epo
     # Save results to a JSON file
     with open(os.path.join(results_dir, f'{model_name}_results.json'), 'w') as f:
         json.dump(results, f)
-
     # Save model
     torch.save(net.state_dict(), os.path.join(results_dir, f'{model_name}_model.pth'))
-
     return results
 
 def paths_to_dataloader(path, transform):
@@ -202,16 +190,27 @@ def paths_to_dataloader(path, transform):
 
 def main():
     # Transformations
+    # transform = transforms.Compose([
+    #
+    #     transforms.ToTensor(),
+    #     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    # ])
     transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        transforms.Resize((256, 256)),  # Resize to 256x256 for consistency
+        transforms.RandomCrop((224, 224)),  # Random crop to 224x224
+        transforms.RandomHorizontalFlip(),  # Random horizontal flip for augmentation
+        transforms.ToTensor(),  # Convert PIL Image to tensor
+        transforms.Normalize(  # Normalize with ImageNet mean and std
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
     ])
 
     # Train multiple models with different hyperparameters
     models_to_train = [
-        {'name': 'model_original', 'learning_rate': 0.001, 'epochs': 100, 'path_train': path_train_original},
-        {'name': 'model_1_pct', 'learning_rate': 0.001, 'epochs': 100, 'path_train': path_train_one_percent},
-        {'name': 'model_2_pct', 'learning_rate': 0.001, 'epochs': 100, 'path_train': path_train_double_one_percent},
+        {'name': 'model_original', 'learning_rate': 0.001, 'epochs': 2, 'path_train': path_train_original},
+        {'name': 'model_5_pct', 'learning_rate': 0.001, 'epochs': 2, 'path_train': path_train_one_percent},
+        {'name': 'model_10_pct', 'learning_rate': 0.001, 'epochs': 2, 'path_train': path_train_double_one_percent},
     ]
 
     val_loader, _ = paths_to_dataloader(path_val, transform)
